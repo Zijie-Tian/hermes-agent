@@ -1005,15 +1005,27 @@ def _try_codex() -> Tuple[Optional[Any], Optional[str]]:
         if codex_token:
             base_url = _pool_runtime_base_url(entry, _CODEX_AUX_BASE_URL) or _CODEX_AUX_BASE_URL
         else:
-            codex_token = _read_codex_access_token()
+            try:
+                from hermes_cli.auth import resolve_codex_runtime_credentials
+
+                creds = resolve_codex_runtime_credentials()
+            except Exception:
+                creds = None
+            codex_token = str((creds or {}).get("api_key") or "").strip() or _read_codex_access_token()
             if not codex_token:
                 return None, None
-            base_url = _CODEX_AUX_BASE_URL
+            base_url = str((creds or {}).get("base_url") or "").strip().rstrip("/") or _CODEX_AUX_BASE_URL
     else:
-        codex_token = _read_codex_access_token()
+        try:
+            from hermes_cli.auth import resolve_codex_runtime_credentials
+
+            creds = resolve_codex_runtime_credentials()
+        except Exception:
+            creds = None
+        codex_token = str((creds or {}).get("api_key") or "").strip() or _read_codex_access_token()
         if not codex_token:
             return None, None
-        base_url = _CODEX_AUX_BASE_URL
+        base_url = str((creds or {}).get("base_url") or "").strip().rstrip("/") or _CODEX_AUX_BASE_URL
     logger.debug("Auxiliary client: Codex OAuth (%s via Responses API)", _CODEX_AUX_MODEL)
     real_client = OpenAI(api_key=codex_token, base_url=base_url)
     return CodexAuxiliaryClient(real_client, _CODEX_AUX_MODEL), _CODEX_AUX_MODEL
@@ -1469,13 +1481,20 @@ def resolve_provider_client(
         if raw_codex:
             # Return the raw OpenAI client for callers that need direct
             # access to responses.stream() (e.g., the main agent loop).
-            codex_token = _read_codex_access_token()
+            try:
+                from hermes_cli.auth import resolve_codex_runtime_credentials
+
+                creds = resolve_codex_runtime_credentials()
+            except Exception:
+                creds = None
+            codex_token = str((creds or {}).get("api_key") or "").strip() or _read_codex_access_token()
             if not codex_token:
                 logger.warning("resolve_provider_client: openai-codex requested "
                                "but no Codex OAuth token found (run: hermes model)")
                 return None, None
             final_model = _normalize_resolved_model(model or _CODEX_AUX_MODEL, provider)
-            raw_client = OpenAI(api_key=codex_token, base_url=_CODEX_AUX_BASE_URL)
+            base_url = str((creds or {}).get("base_url") or "").strip().rstrip("/") or _CODEX_AUX_BASE_URL
+            raw_client = OpenAI(api_key=codex_token, base_url=base_url)
             return (raw_client, final_model)
         # Standard path: wrap in CodexAuxiliaryClient adapter
         client, default = _try_codex()

@@ -736,9 +736,7 @@ class AIAgent:
         self.provider = provider_name or ""
         self.acp_command = acp_command or command
         self.acp_args = list(acp_args or args or [])
-        if api_mode in {"chat_completions", "codex_responses", "anthropic_messages", "bedrock_converse"}:
-            self.api_mode = api_mode
-        elif self.provider == "openai-codex":
+        if self.provider == "openai-codex":
             self.api_mode = "codex_responses"
         elif self.provider == "xai":
             self.api_mode = "codex_responses"
@@ -748,6 +746,8 @@ class AIAgent:
         elif (provider_name is None) and "api.x.ai" in self._base_url_lower:
             self.api_mode = "codex_responses"
             self.provider = "xai"
+        elif api_mode in {"chat_completions", "codex_responses", "anthropic_messages", "bedrock_converse"}:
+            self.api_mode = api_mode
         elif self.provider == "anthropic" or (provider_name is None and "api.anthropic.com" in self._base_url_lower):
             self.api_mode = "anthropic_messages"
             self.provider = "anthropic"
@@ -4455,6 +4455,63 @@ class AIAgent:
             return bool(getattr(http_client, "is_closed", False))
         return False
 
+    @staticmethod
+    def _has_proxy_configured() -> bool:
+        """Return True when HTTPX/OpenAI should honor proxy configuration.
+
+        HTTPX resolves proxies from both standard environment variables and
+        platform-level proxy settings. When we inject a custom transport for TCP
+        keepalive, HTTPX stops constructing its normal proxy-aware mounts, so we
+        should skip transport injection whenever a proxy is configured.
+        """
+        try:
+            from urllib.request import getproxies
+
+            proxies = getproxies() or {}
+        except Exception:
+            proxies = {}
+        return any(str(value or "").strip() for value in proxies.values())
+
+    @staticmethod
+    def _iter_client_sockets(client: Any):
+        """Yield raw sockets reachable through an OpenAI/httpx client."""
+        http_client = getattr(client, "_client", None)
+        if http_client is None:
+            return
+
+        transports = []
+        transport = getattr(http_client, "_transport", None)
+        if transport is not None:
+            transports.append(transport)
+
+        mounts = getattr(http_client, "_mounts", None)
+        if isinstance(mounts, dict):
+            transports.extend(t for t in mounts.values() if t is not None)
+
+        for transport in transports:
+            pool = getattr(transport, "_pool", None)
+            if pool is None:
+                continue
+            connections = (
+                getattr(pool, "_connections", None)
+                or getattr(pool, "_pool", None)
+                or []
+            )
+            for conn in list(connections):
+                stream = (
+                    getattr(conn, "_network_stream", None)
+                    or getattr(conn, "_stream", None)
+                )
+                if stream is None:
+                    continue
+                sock = getattr(stream, "_sock", None)
+                if sock is None:
+                    sock = getattr(stream, "stream", None)
+                    if sock is not None:
+                        sock = getattr(sock, "_sock", None)
+                if sock is not None:
+                    yield sock
+
     def _create_openai_client(self, client_kwargs: dict, *, reason: str, shared: bool) -> Any:
         from agent.auxiliary_client import _validate_base_url, _validate_proxy_env_urls
         # Treat client_kwargs as read-only. Callers pass self._client_kwargs (or shallow
@@ -4512,7 +4569,7 @@ class AIAgent:
         # constructs a fresh one — no stale closed transport can be reused.
         # Tests in ``tests/run_agent/test_create_openai_client_reuse.py`` and
         # ``tests/run_agent/test_sequential_chats_live.py`` pin this invariant.
-        if "http_client" not in client_kwargs:
+        if "http_client" not in client_kwargs and not self._has_proxy_configured():
             try:
                 import httpx as _httpx
                 import socket as _socket
@@ -4555,36 +4612,7 @@ class AIAgent:
 
         closed = 0
         try:
-            http_client = getattr(client, "_client", None)
-            if http_client is None:
-                return 0
-            transport = getattr(http_client, "_transport", None)
-            if transport is None:
-                return 0
-            pool = getattr(transport, "_pool", None)
-            if pool is None:
-                return 0
-            # httpx uses httpcore connection pools; connections live in
-            # _connections (list) or _pool (list) depending on version.
-            connections = (
-                getattr(pool, "_connections", None)
-                or getattr(pool, "_pool", None)
-                or []
-            )
-            for conn in list(connections):
-                stream = (
-                    getattr(conn, "_network_stream", None)
-                    or getattr(conn, "_stream", None)
-                )
-                if stream is None:
-                    continue
-                sock = getattr(stream, "_sock", None)
-                if sock is None:
-                    sock = getattr(stream, "stream", None)
-                    if sock is not None:
-                        sock = getattr(sock, "_sock", None)
-                if sock is None:
-                    continue
+            for sock in AIAgent._iter_client_sockets(client):
                 try:
                     sock.shutdown(_socket.SHUT_RDWR)
                 except OSError:
@@ -4668,36 +4696,8 @@ class AIAgent:
         if client is None:
             return False
         try:
-            http_client = getattr(client, "_client", None)
-            if http_client is None:
-                return False
-            transport = getattr(http_client, "_transport", None)
-            if transport is None:
-                return False
-            pool = getattr(transport, "_pool", None)
-            if pool is None:
-                return False
-            connections = (
-                getattr(pool, "_connections", None)
-                or getattr(pool, "_pool", None)
-                or []
-            )
             dead_count = 0
-            for conn in list(connections):
-                # Check for connections that are idle but have closed sockets
-                stream = (
-                    getattr(conn, "_network_stream", None)
-                    or getattr(conn, "_stream", None)
-                )
-                if stream is None:
-                    continue
-                sock = getattr(stream, "_sock", None)
-                if sock is None:
-                    sock = getattr(stream, "stream", None)
-                    if sock is not None:
-                        sock = getattr(sock, "_sock", None)
-                if sock is None:
-                    continue
+            for sock in self._iter_client_sockets(client):
                 # Probe socket health with a non-blocking recv peek
                 import socket as _socket
                 try:

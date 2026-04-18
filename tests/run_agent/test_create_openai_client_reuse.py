@@ -186,3 +186,31 @@ def test_replace_primary_openai_client_survives_repeated_rebuilds():
         "Some _create_openai_client calls returned the same object across "
         "a teardown — rebuild is not producing fresh clients"
     )
+
+
+def test_has_proxy_configured_detects_proxy_settings(monkeypatch):
+    monkeypatch.setattr("urllib.request.getproxies", lambda: {"https": "http://127.0.0.1:10809"})
+    assert AIAgent._has_proxy_configured() is True
+
+
+def test_create_openai_client_skips_custom_http_client_when_proxy_configured(monkeypatch):
+    agent = _make_agent()
+    constructed: list = []
+    fake_openai = _make_fake_openai_factory(constructed)
+    agent._client_kwargs = {
+        "api_key": "test-key-value",
+        "base_url": "https://chatgpt.com/backend-api/codex",
+    }
+
+    monkeypatch.setattr(AIAgent, "_has_proxy_configured", staticmethod(lambda: True))
+
+    with patch("run_agent.OpenAI", fake_openai):
+        client = agent._create_openai_client(
+            agent._client_kwargs, reason="proxy", shared=True
+        )
+
+    assert constructed == [client]
+    assert constructed[0]._http_client is None, (
+        "When a proxy is configured, Hermes should leave transport construction "
+        "to OpenAI/httpx so proxy-aware defaults remain active."
+    )

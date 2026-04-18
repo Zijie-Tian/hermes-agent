@@ -214,6 +214,23 @@ def test_api_mode_uses_explicit_provider_when_codex(monkeypatch):
     assert agent.provider == "openai-codex"
 
 
+def test_api_mode_forces_codex_responses_even_when_caller_passes_chat_completions(monkeypatch):
+    _patch_agent_bootstrap(monkeypatch)
+    agent = run_agent.AIAgent(
+        model="gpt-5.4",
+        base_url="https://chatgpt.com/backend-api/codex",
+        provider="openai-codex",
+        api_mode="chat_completions",
+        api_key="codex-token",
+        quiet_mode=True,
+        max_iterations=1,
+        skip_context_files=True,
+        skip_memory=True,
+    )
+    assert agent.provider == "openai-codex"
+    assert agent.api_mode == "codex_responses"
+
+
 def test_api_mode_normalizes_provider_case(monkeypatch):
     _patch_agent_bootstrap(monkeypatch)
     agent = run_agent.AIAgent(
